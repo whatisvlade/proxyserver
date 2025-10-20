@@ -938,7 +938,7 @@ server.on('connect', (req, clientSocket) => {
 });
 
 // ====== ЗАПУСК ======
-const PORT = process.env.PORT || process.env.RAILWAY_PORT || 8080;
+const PORT = process.env.PORT || process.env.RAILWAY_PORT || 8081;
 
 async function startServer() {
   await loadConfig();
