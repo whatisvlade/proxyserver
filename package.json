@@ -1,0 +1,11 @@
+{
+  "name": "enhanced-proxy-server",
+  "version": "1.0.0",
+  "main": "enhanced-proxy-server.js",
+  "scripts": {
+    "start": "node enhanced-proxy-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
