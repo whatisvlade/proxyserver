@@ -513,6 +513,7 @@ app.get('/current', (req, res) => {
   });
 });
 
+// ====== МОДИФИЦИРОВАННЫЙ /myip ENDPOINT - ТОЛЬКО ЧЕРЕЗ НАШ ПРОКСИ ======
 app.get('/myip', async (req, res) => {
   const user = authenticate(req.headers['authorization']);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -523,31 +524,24 @@ app.get('/myip', async (req, res) => {
   const up = parseProxyUrl(proxyUrl);
   if (!up) return res.status(502).json({ error: 'Invalid proxy config' });
 
-  console.log(`[API] GET /myip user=${user} via ${up.host}:${up.port}`);
+  console.log(`[API] GET /myip user=${user} via ${up.host}:${up.port} - checking through our proxy server`);
 
-  const ipServices = [
-    { url: 'http://api.ipify.org?format=json', type: 'json' },
-    { url: 'http://ifconfig.me/ip', type: 'text' },
-    { url: 'http://icanhazip.com', type: 'text' },
-    { url: 'http://ident.me', type: 'text' },
-    { url: 'http://checkip.amazonaws.com', type: 'text' }
-  ];
-
-  function fetchViaProxy(service) {
+  // Получаем IP адрес прокси сервера напрямую
+  function getProxyIP() {
     return new Promise((resolve, reject) => {
-      const serviceUrlObj = new URL(service.url);
+      // Создаем простое HTTP соединение через прокси для получения его IP
       const proxyOptions = {
         hostname: up.host,
         port: up.port,
-        path: service.url,
+        path: 'http://httpbin.org/ip', // Простой сервис для получения IP
         method: 'GET',
         headers: {
           'Proxy-Authorization': `Basic ${Buffer.from(`${up.username}:${up.password}`).toString('base64')}`,
-          'Host': serviceUrlObj.hostname,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Host': 'httpbin.org',
+          'User-Agent': 'ProxyChecker/1.0',
         },
         agent: upstreamAgent,
-        timeout: 10000 // Уменьшено для быстрых ответов
+        timeout: 10000
       };
 
       const proxyReq = http.request(proxyOptions, (proxyRes) => {
@@ -555,37 +549,63 @@ app.get('/myip', async (req, res) => {
         proxyRes.on('data', chunk => data += chunk);
         proxyRes.on('end', () => {
           if (proxyRes.statusCode >= 200 && proxyRes.statusCode < 300) {
-            let ip = null;
-            if (service.type === 'json') {
-              try { ip = JSON.parse(data).ip; } catch {}
+            try {
+              // Пытаемся парсить JSON ответ
+              const parsed = JSON.parse(data);
+              if (parsed.origin) {
+                return resolve({ ip: parsed.origin, source: 'httpbin.org' });
+              }
+            } catch {}
+            
+            // Если JSON не парсится, ищем IP в тексте
+            const ipMatch = data.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/) ||
+                           data.match(/(?:[0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}/);
+            
+            if (ipMatch) {
+              return resolve({ ip: ipMatch[0], source: 'text_parse' });
             }
-            if (!ip) {
-              ip = data.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0] ||
-                   data.match(/(?:[0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}/)?.[0] ||
-                   data.trim();
-            }
-            if (ip && /^[\d.:]+$/.test(ip)) return resolve({ ip, service: service.url });
-            return reject(new Error('Bad IP parse'));
+            
+            return reject(new Error('No IP found in response'));
           } else {
-            return reject(new Error(`HTTP ${proxyRes.statusCode}`));
+            return reject(new Error(`HTTP ${proxyRes.statusCode}: ${data}`));
           }
         });
       });
 
-      proxyReq.on('socket', s => { try { s.setNoDelay(true); s.setKeepAlive(true, 5000); } catch {} });
-      proxyReq.on('timeout', () => proxyReq.destroy(new Error('Timeout')));
+      proxyReq.on('socket', s => { 
+        try { 
+          s.setNoDelay(true); 
+          s.setKeepAlive(true, 5000); 
+        } catch {} 
+      });
+      proxyReq.on('timeout', () => proxyReq.destroy(new Error('Request timeout')));
       proxyReq.on('error', reject);
       proxyReq.end();
     });
   }
 
   try {
-    const result = await Promise.any(ipServices.map(fetchViaProxy));
-    console.log(`[API] /myip result for ${user}: ${result.ip} via ${result.service}`);
-    return res.json({ ip: result.ip, proxy: `${up.host}:${up.port}`, service: result.service });
+    const result = await getProxyIP();
+    console.log(`[API] /myip result for ${user}: ${result.ip} via proxy ${up.host}:${up.port} (source: ${result.source})`);
+    
+    res.json({ 
+      ip: result.ip, 
+      proxy: `${up.host}:${up.port}`,
+      source: result.source,
+      method: 'proxy_server_check',
+      timestamp: new Date().toISOString()
+    });
   } catch (err) {
-    console.error(`[API] /myip all services failed for ${user}: ${err?.message}`);
-    return res.status(502).json({ error: 'Failed to get IP from all services', lastError: err?.message });
+    console.error(`[API] /myip failed for ${user} via ${up.host}:${up.port}: ${err?.message}`);
+    
+    // Возвращаем информацию о прокси даже если проверка не удалась
+    res.status(502).json({ 
+      error: 'Failed to get IP through proxy', 
+      proxy: `${up.host}:${up.port}`,
+      lastError: err?.message,
+      method: 'proxy_server_check',
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
@@ -629,6 +649,7 @@ app.get('/status', (req, res) => {
     instantMode: true,
     telegramBotEnabled: true,
     optimizedFor: '32GB RAM - Ultra High Load',
+    ipCheckMethod: 'proxy_server_only', // Указываем что проверяем IP только через прокси
     memory: {
       rss: Math.round(memUsage.rss / 1024 / 1024) + 'MB',
       heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + 'MB',
@@ -684,6 +705,7 @@ Auth: Basic (${authInfo})
 - Ultra-optimized for high load (1000+ connections)
 - 32GB RAM configuration
 - Maximum socket pools (2000 total)
+- IP check only through proxy server (no external services)
 
 📊 Current Status:
 - Memory: ${Math.round(memUsage.rss / 1024 / 1024)}MB / 32GB
@@ -694,7 +716,7 @@ Auth: Basic (${authInfo})
     <ul>
       <li>GET /status - server status</li>
       <li>GET /current (requires Basic) - current proxy</li>
-      <li>GET /myip (requires Basic) - get IP via proxy</li>
+      <li>GET /myip (requires Basic) - get IP via proxy (proxy server only)</li>
       <li>POST /rotate (requires Basic) - rotate proxy</li>
     </ul>
     <h2>Telegram Bot API:</h2>
@@ -716,6 +738,7 @@ Auth: Basic (${authInfo})
     <p>Overlapping proxies: ${totalOverlapping}</p>
     <p>Blocked proxies: ${blockedProxies.size}</p>
     <p>Memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB</p>
+    <p><strong>IP Check Method:</strong> Proxy Server Only (no external services)</p>
   `);
 });
 
@@ -889,6 +912,7 @@ async function startServer() {
     console.log(`🌐 Public (TCP Proxy): ${PUBLIC_HOST}`);
     console.log(`✅ API self hostnames: ${[...SELF_HOSTNAMES].join(', ')}`);
     console.log(`🤖 Telegram Bot API enabled`);
+    console.log(`🔍 IP Check Method: Proxy Server Only (no external services)`);
     console.log(`💾 Memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB / 32GB available`);
     console.log(`🔧 Max connections: ${server.maxConnections}`);
     console.log(`🔧 Agent max sockets: ${upstreamAgent.maxSockets}`);
