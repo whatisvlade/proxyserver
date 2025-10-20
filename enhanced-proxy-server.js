@@ -228,7 +228,7 @@ const upstreamHttpsAgent = new https.Agent({
 // app.use((req, res, next) => { res.setHeader('Connection', 'close'); next(); });
 
 // Быстрая проверка self-API запросов
-const PUBLIC_HOST = (process.env.PUBLIC_HOST || 'yamabiko.proxy.rlwy.net:38659').toLowerCase();
+const PUBLIC_HOST = (process.env.PUBLIC_HOST || 'interchange.proxy.rlwy.net:37699').toLowerCase();
 const EXTRA_HOSTS = (process.env.EXTRA_HOSTS || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
