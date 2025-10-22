@@ -513,7 +513,7 @@ app.get('/current', (req, res) => {
   });
 });
 
-// ====== МОДИФИЦИРОВАННЫЙ /myip ENDPOINT - ТОЛЬКО ЧЕРЕЗ НАШ ПРОКСИ ======
+// ====== УЛУЧШЕННЫЙ /myip ENDPOINT С НАДЕЖНЫМИ СЕРВИСАМИ ======
 app.get('/myip', async (req, res) => {
   const user = authenticate(req.headers['authorization']);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -524,90 +524,197 @@ app.get('/myip', async (req, res) => {
   const up = parseProxyUrl(proxyUrl);
   if (!up) return res.status(502).json({ error: 'Invalid proxy config' });
 
-  console.log(`[API] GET /myip user=${user} via ${up.host}:${up.port} - checking through our proxy server`);
+  console.log(`[API] GET /myip user=${user} via ${up.host}:${up.port}`);
 
-  // Получаем IP адрес прокси сервера напрямую
-  function getProxyIP() {
+  // СПИСОК НАДЕЖНЫХ АЛЬТЕРНАТИВ httpbin.org
+  const ipServices = [
+    {
+      url: 'http://api.ipify.org',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://checkip.amazonaws.com', 
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://icanhazip.com',
+      type: 'text', 
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://ident.me',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://myexternalip.com/raw',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://ipecho.net/plain',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://whatismyip.akamai.com',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://tnx.nl/ip',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://wgetip.com',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://ip.tyk.nu',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://l2.io/ip',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://ifconfig.me/ip',
+      type: 'text',
+      parse: (data) => data.trim()
+    },
+    {
+      url: 'http://corz.org/ip',
+      type: 'text',
+      parse: (data) => data.trim()
+    }
+  ];
+
+  async function getIPFromServices() {
+    // Перемешиваем сервисы для балансировки нагрузки
+    const shuffledServices = [...ipServices].sort(() => Math.random() - 0.5);
+    
+    for (const service of shuffledServices) {
+      try {
+        const ip = await getIPFromService(service, up);
+        if (ip && isValidIP(ip)) {
+          return { ip, source: service.url };
+        }
+      } catch (err) {
+        console.log(`[API] IP service ${service.url} failed: ${err.message}`);
+        // Продолжаем пробовать следующий сервис
+      }
+    }
+    throw new Error('All IP services failed');
+  }
+
+  function getIPFromService(service, up) {
     return new Promise((resolve, reject) => {
-      // Создаем простое HTTP соединение через прокси для получения его IP
+      const url = new URL(service.url);
+      
       const proxyOptions = {
         hostname: up.host,
         port: up.port,
-        path: 'http://httpbin.org/ip', // Простой сервис для получения IP
+        path: service.url,
         method: 'GET',
         headers: {
           'Proxy-Authorization': `Basic ${Buffer.from(`${up.username}:${up.password}`).toString('base64')}`,
-          'Host': 'httpbin.org',
+          'Host': url.host,
           'User-Agent': 'ProxyChecker/1.0',
+          'Accept': 'text/plain, */*',
+          'Connection': 'close'
         },
         agent: upstreamAgent,
-        timeout: 10000
+        timeout: 8000 // Уменьшено для быстрых ответов
       };
 
       const proxyReq = http.request(proxyOptions, (proxyRes) => {
-        let data = '';
-        proxyRes.on('data', chunk => data += chunk);
-        proxyRes.on('end', () => {
-          if (proxyRes.statusCode >= 200 && proxyRes.statusCode < 300) {
+        if (proxyRes.statusCode >= 200 && proxyRes.statusCode < 300) {
+          let data = '';
+          proxyRes.on('data', chunk => data += chunk.toString());
+          proxyRes.on('end', () => {
             try {
-              // Пытаемся парсить JSON ответ
-              const parsed = JSON.parse(data);
-              if (parsed.origin) {
-                return resolve({ ip: parsed.origin, source: 'httpbin.org' });
+              const ip = service.parse(data);
+              if (ip && isValidIP(ip)) {
+                resolve(ip);
+              } else {
+                reject(new Error('Invalid IP format received'));
               }
-            } catch {}
-            
-            // Если JSON не парсится, ищем IP в тексте
-            const ipMatch = data.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/) ||
-                           data.match(/(?:[0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}/);
-            
-            if (ipMatch) {
-              return resolve({ ip: ipMatch[0], source: 'text_parse' });
+            } catch (parseError) {
+              reject(new Error(`Parse error: ${parseError.message}`));
             }
-            
-            return reject(new Error('No IP found in response'));
-          } else {
-            return reject(new Error(`HTTP ${proxyRes.statusCode}: ${data}`));
-          }
-        });
+          });
+        } else {
+          reject(new Error(`HTTP ${proxyRes.statusCode}`));
+        }
       });
 
       proxyReq.on('socket', s => { 
         try { 
           s.setNoDelay(true); 
-          s.setKeepAlive(true, 5000); 
+          s.setKeepAlive(false); // Отключаем keep-alive для тестовых запросов
+          s.setTimeout(8000);
         } catch {} 
       });
-      proxyReq.on('timeout', () => proxyReq.destroy(new Error('Request timeout')));
+      
+      proxyReq.on('timeout', () => {
+        proxyReq.destroy();
+        reject(new Error('Request timeout'));
+      });
+      
       proxyReq.on('error', reject);
       proxyReq.end();
     });
   }
 
+  function isValidIP(ip) {
+    // Проверяем IPv4
+    const ipv4Regex = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+    if (ipv4Regex.test(ip)) {
+      const parts = ip.split('.');
+      return parts.every(part => {
+        const num = parseInt(part, 10);
+        return num >= 0 && num <= 255;
+      });
+    }
+    
+    // Проверяем IPv6 (упрощенная проверка)
+    const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}$/;
+    return ipv6Regex.test(ip);
+  }
+
   try {
-    const result = await getProxyIP();
-    console.log(`[API] /myip result for ${user}: ${result.ip} via proxy ${up.host}:${up.port} (source: ${result.source})`);
+    const result = await getIPFromServices();
+    console.log(`[API] /myip result for ${user}: ${result.ip} via ${result.source}`);
     
     res.json({ 
       ip: result.ip, 
       proxy: `${up.host}:${up.port}`,
       source: result.source,
-      method: 'proxy_server_check',
-      timestamp: new Date().toISOString()
+      method: 'multi_service_check',
+      timestamp: new Date().toISOString(),
+      services_tested: ipServices.length
     });
   } catch (err) {
-    console.error(`[API] /myip failed for ${user} via ${up.host}:${up.port}: ${err?.message}`);
+    console.error(`[API] /myip all services failed for ${user}: ${err.message}`);
     
-    // Возвращаем информацию о прокси даже если проверка не удалась
-    res.status(502).json({ 
-      error: 'Failed to get IP through proxy', 
+    // Фолбэк: возвращаем хост прокси как минимальную информацию
+    res.json({ 
+      ip: up.host, 
       proxy: `${up.host}:${up.port}`,
-      lastError: err?.message,
-      method: 'proxy_server_check',
-      timestamp: new Date().toISOString()
+      error: 'External IP services unavailable, showing proxy host',
+      method: 'fallback_proxy_host',
+      timestamp: new Date().toISOString(),
+      services_tested: ipServices.length
     });
   }
 });
+
 
 app.get('/status', (req, res) => {
   let totalOverlapping = 0;
