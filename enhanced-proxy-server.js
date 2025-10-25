@@ -793,7 +793,7 @@ function tryConnect(req, clientSocket, user) {
     return clientSocket.end();
   }
 
-  console.log(`CONNECT: ${user} -> ${up.host}:${up.port} -> ${req.url}`);
+  
   const proxySocket = net.createConnection(up.port, up.host);
 
   const pair = { clientSocket, proxySocket };
